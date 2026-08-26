@@ -1,0 +1,221 @@
+# Voter-Controlled Final Confirmation & Polling Officer Audit System
+
+This implements the 5-layer offline voting security architecture you described, transforming the current single-step `CastOfflineVote.jsx` flow into a proper **dual-screen voter-confirmed voting pipeline** with a full **officer audit trail** and **admin monitoring dashboard**.
+
+---
+
+## User Review Required
+
+> [!IMPORTANT]
+> The current flow lets the officer cast the final vote with a simple `window.confirm()` dialog — there is **zero voter agency**. This plan replaces it entirely with a proper voter-controlled confirmation system.
+
+> [!WARNING]
+> The Vote model and officer controller will be extended. Existing offline votes already in the database are not affected (backward-compatible schema additions only).
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> **Dual-screen setup**: Your design describes a separate "Voter Screen" vs "Officer Screen." In a single-browser prototype, the best approach is to open the voter confirmation screen in a **second browser window/tab** (via `window.open`) that auto-refreshes via polling. Does this work for your demo setup, or do you prefer a **single-page split view** (two panels side by side)?
+
+> [!IMPORTANT]
+> **Receipt privacy**: As you noted, a receipt showing the actual candidate choice is a privacy/coercion risk in real elections. For your prototype, should I include the candidate name on the receipt, or show only "Vote Successfully Recorded" + Receipt ID? (The plan defaults to showing the candidate name since this is a college prototype, with a clearly visible "SIMULATION" watermark.)
+
+> [!IMPORTANT]
+> **Countdown timer**: The voter has 30 seconds to review before the session auto-cancels and returns to search. Should this auto-cancel behavior be included, or should the session wait indefinitely until the voter acts?
+
+---
+
+## Architecture Overview
+
+```
+Officer Screen (officer portal)          Voter Screen (opens in new tab)
+─────────────────────────────────        ────────────────────────────────
+1. Search voter by Voter ID              (waiting)
+2. Face verification via webcam          (waiting)
+3. Select candidate on officer screen    (waiting)
+4. Click "Send to Voter Screen" ──────►  5. Shows VOTE CONFIRMATION
+   [Waiting for Voter Confirmation]          [ Party Logo ]
+                                             [ CHANGE ]  [ FINAL CONFIRM ]
+                                         6a. CHANGE → back to officer screen
+                                         6b. FINAL CONFIRM → vote locked
+7. Officer sees "VOTE LOCKED" status ◄── 7. Shows digital receipt
+8. Admin sees audit trail entry
+```
+
+**Security Properties:**
+1. Officer **cannot** press Final Confirm — only the voter can
+2. Every action is timestamped in the `VoteAuditLog` model
+3. Officers with high "change rates" are flagged in the admin dashboard
+4. Vote session expires if abandoned
+
+---
+
+## Proposed Changes
+
+### Backend — New Model
+
+#### [NEW] VoteAuditLog.js
+`server/models/VoteAuditLog.js`
+
+New Mongoose model tracking every officer action per voter session:
+- `officerId`, `voterId`, `electionId`
+- `sessionId` (UUID for grouping one voter's full flow)
+- `events[]` — array of `{ action, candidateId, timestamp }` where action is one of: `session_started`, `candidate_selected`, `voter_requested_change`, `candidate_reselected`, `voter_confirmed`
+- `finalCandidateId`, `status` (`pending` | `confirmed` | `abandoned`)
+- `receiptId` (UUID like `VOTE-8F29A71C`)
+
+---
+
+### Backend — Officer Controller
+
+#### [MODIFY] officer.controller.js
+`server/controllers/officer.controller.js`
+
+Add 4 new controller functions:
+
+| Function | Route | Description |
+|---|---|---|
+| `startVoteSession` | `POST /officer/session/start` | Creates a pending VoteAuditLog entry, returns `sessionId` |
+| `selectCandidate` | `POST /officer/session/select` | Updates session with selected candidate, appends audit event |
+| `getSessionStatus` | `GET /officer/session/:sessionId` | Voter screen polls this to see current state |
+| `voterConfirmVote` | `POST /officer/session/confirm` | **Voter-only** — locks the vote, creates Vote record, generates receipt |
+| `voterRequestChange` | `POST /officer/session/change` | Voter requests change, appends event, resets status to `pending_selection` |
+| `getOfficerAuditStats` | `GET /admin/officer-audit` | Returns per-officer stats: votes handled, change count, change rate, flagged if >15% |
+
+The existing `castOfflineVote` function is **kept** (for backward compatibility) but the new flow uses the session-based approach.
+
+---
+
+### Backend — Routes
+
+#### [MODIFY] officer.routes.js
+`server/routes/officer.routes.js`
+
+Add:
+```
+POST /officer/session/start
+POST /officer/session/select
+GET  /officer/session/:sessionId
+POST /officer/session/confirm
+POST /officer/session/change
+```
+
+#### [MODIFY] admin.routes.js
+`server/routes/admin.routes.js`
+
+Add:
+```
+GET /admin/officer-audit
+```
+
+---
+
+### Frontend — Officer Flow
+
+#### [MODIFY] CastOfflineVote.jsx
+`client/src/pages/officer/CastOfflineVote.jsx`
+
+**Complete rewrite.** New multi-step flow:
+
+**Step 1 — Candidate Selection (Officer Screen)**
+- Shows voter name + ID at the top
+- Grid of candidate cards (same as current)
+- Bottom: `[ Send to Voter for Confirmation ]` button (replaces "Confirm Vote")
+- Clicking sends `POST /officer/session/select`, then opens voter screen in new tab
+
+**Step 2 — Waiting State (Officer Screen)**
+- After sending, officer screen shows:
+  - Voter name, selected candidate
+  - Large pulsing `[ Waiting for Voter Confirmation ]` badge
+  - Live status (polls `GET /officer/session/:sessionId` every 2s)
+  - If voter requests CHANGE: officer sees notification, can re-select candidate
+  - If voter confirms: officer sees "✅ Vote Locked" + receipt ID
+
+---
+
+### Frontend — New Voter Confirmation Screen
+
+#### [NEW] VoterConfirmation.jsx
+`client/src/pages/officer/VoterConfirmation.jsx`
+
+This is the **voter-facing screen** opened in a new tab/window. It:
+- Reads `sessionId` from the URL query string (e.g. `/officer/voter-confirm?session=abc123`)
+- Polls `GET /officer/session/:sessionId` every 2s for current candidate selection
+- Shows the large, beautiful confirmation UI:
+  - Party logo / candidate photo
+  - Candidate name + party name
+  - 30-second countdown timer
+  - `[ CHANGE VOTE ]` (amber) + `[ FINAL CONFIRM MY VOTE ]` (green) buttons
+- On CHANGE: calls `POST /officer/session/change`, shows "Officer is reselecting..." state
+- On FINAL CONFIRM: calls `POST /officer/session/confirm`, shows digital receipt
+
+**Digital Receipt:**
+```
+━━━━━━━━━━━━━━━━━━━━━━
+      VOTING RECEIPT
+━━━━━━━━━━━━━━━━━━━━━━
+Election: 2026 General Election
+[SIMULATION — College Prototype]
+Your Vote: ABC Party — Candidate Name
+✓ Vote Successfully Recorded
+Receipt ID: VOTE-8F29A71C
+Time: 10:42:18 AM
+━━━━━━━━━━━━━━━━━━━━━━
+```
+
+---
+
+### Frontend — Admin Officer Audit Dashboard
+
+#### [NEW] OfficerAudit.jsx
+`client/src/pages/admin/OfficerAudit.jsx`
+
+New admin page showing:
+- Table of all officers: name, email, office, votes handled, change requests, change rate %
+- Officers with >15% change rate get a `⚠️ HIGH CHANGE RATE` badge
+- Click any officer → expandable audit log showing every session with timeline
+- Example timeline entry:
+  ```
+  Officer O102 | Voter V12345
+  10:41:02 → Candidate A selected
+  10:41:15 → Voter requested change
+  10:41:29 → Candidate B selected
+  10:41:40 → Voter confirmed Candidate B
+  STATUS: FINAL ✅
+  ```
+
+#### [MODIFY] AdminDashboard.jsx
+`client/src/pages/admin/AdminDashboard.jsx`
+
+Add an "Officer Audit" card linking to the new page.
+
+---
+
+### Frontend — App.jsx Routing
+
+#### [MODIFY] App.jsx
+`client/src/App.jsx`
+
+Add routes:
+- `/officer/voter-confirm` → `VoterConfirmation` (public, no auth — voter doesn't have an account)
+- `/admin/officer-audit` → `OfficerAudit` (admin-protected)
+
+---
+
+## Verification Plan
+
+### Manual Verification
+1. Officer searches voter → face verifies → selects candidate → sends to voter screen
+2. Voter screen opens in new tab, shows confirmation with 30s timer
+3. Voter presses CHANGE → officer screen shows "re-select" state
+4. Officer re-selects → voter screen updates with new candidate
+5. Voter presses FINAL CONFIRM → vote is locked; receipt shows on voter screen
+6. Officer screen shows "Vote Locked ✅ Receipt ID: VOTE-XXXX"
+7. Admin officer audit page shows the session with full timeline + change rate stats
+8. Verify no double-vote possible (existing `hasVoted` check + unique index on Vote)
+
+### Automated
+- Existing server routes and DB integrity constraints are preserved
+- The `voteSchema` unique index `{ voterId, electionId }` still prevents double voting
