@@ -20,10 +20,14 @@ app.use(helmet({
 }));
 
 // CORS
-app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:5173',
+const corsOptions = {
+  origin: [
+    'http://localhost:5173',
+    process.env.CLIENT_URL
+  ].filter(Boolean),
   credentials: true
-}));
+};
+app.use(cors(corsOptions));
 
 // Logging
 app.use(morgan('dev'));
