@@ -23,6 +23,7 @@ app.use(helmet({
 const corsOptions = {
   origin: [
     'http://localhost:5173',
+    'https://votexa-chi.vercel.app',
     process.env.CLIENT_URL
   ].filter(Boolean),
   credentials: true
