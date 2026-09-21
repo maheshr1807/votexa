@@ -19,7 +19,8 @@ import { useSearchParams } from 'react-router-dom';
 import axios from 'axios';
 
 /* ── Public API (no auth token needed) ───────────────────── */
-const publicApi = axios.create({ baseURL: '/api' });
+const API_URL = import.meta.env.VITE_API_URL || "";
+const publicApi = axios.create({ baseURL: `${API_URL}/api` });
 
 /* ── Timer constants ─────────────────────────────────────── */
 const CONFIRM_SECONDS = 60; // seconds voter has to review
